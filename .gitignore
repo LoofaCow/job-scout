@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Secrets
+.env
+
+# Local database
+*.db
+*.db-journal
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

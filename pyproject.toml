@@ -4,4 +4,16 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "agno>=2.6.5",
+    "apscheduler>=3.11.2",
+    "beautifulsoup4>=4.14.3",
+    "fastapi>=0.136.1",
+    "httpx>=0.28.1",
+    "ollama>=0.6.2",
+    "openai>=2.35.1",
+    "pydantic-settings>=2.14.0",
+    "python-dotenv>=1.2.2",
+    "sqlmodel>=0.0.38",
+    "uvicorn[standard]>=0.46.0",
+]
