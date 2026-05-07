@@ -180,3 +180,114 @@ Work arrangement: {arrangement}
 Description:
 {job.description}
 """
+
+# ============================================================================
+# Batch scoring — score many jobs and persist evaluations
+# ============================================================================
+
+
+import json
+import logging
+from datetime import datetime, timedelta
+
+from sqlmodel import select
+
+from app.spine.storage import Evaluation, get_session
+
+logger = logging.getLogger(__name__)
+
+
+async def score_unscored_jobs(
+    *,
+    max_jobs: int | None = None,
+    rescore_after_days: int = 7,
+) -> tuple[int, int]:
+    """
+    Score every job that needs scoring, write Evaluations to the DB.
+
+    A job needs scoring if:
+        - It has no Evaluation yet, OR
+        - Its most recent Evaluation is older than `rescore_after_days`
+
+    Args:
+        max_jobs: Cap on how many jobs to score this run. None = unlimited.
+            Useful for testing and for keeping nightly runtime bounded.
+        rescore_after_days: Re-score jobs whose newest evaluation is older
+            than this many days. Default 7.
+
+    Returns:
+        (scored_count, failed_count)
+    """
+    cutoff = datetime.utcnow() - timedelta(days=rescore_after_days)
+    jobs_to_score = _find_jobs_needing_scoring(cutoff=cutoff, limit=max_jobs)
+
+    logger.info(f"Found {len(jobs_to_score)} jobs needing scoring")
+
+    scored = 0
+    failed = 0
+    model_id = _current_model_id()
+
+    for i, job in enumerate(jobs_to_score, start=1):
+        logger.info(f"[{i}/{len(jobs_to_score)}] Scoring: {job.title[:60]} @ {job.company}")
+        try:
+            assessment = await score_job(job)
+            _persist_evaluation(job=job, assessment=assessment, model_used=model_id)
+            scored += 1
+            logger.info(f"  -> {assessment.score}/100")
+        except Exception as e:
+            failed += 1
+            logger.warning(f"  -> FAILED: {e}")
+            continue
+
+    logger.info(f"Batch complete: {scored} scored, {failed} failed")
+    return scored, failed
+
+
+def _find_jobs_needing_scoring(*, cutoff: datetime, limit: int | None) -> list[Job]:
+    """Return jobs that have no recent evaluation."""
+    with get_session() as session:
+        # Jobs with their newest evaluation date (NULL if never evaluated)
+        # We do this in two passes for clarity rather than one fancy query.
+        all_jobs = session.exec(select(Job)).all()
+
+        needs_scoring = []
+        for job in all_jobs:
+            newest_eval = session.exec(
+                select(Evaluation)
+                .where(Evaluation.job_id == job.id)
+                .order_by(Evaluation.evaluated_at.desc())
+                .limit(1)
+            ).first()
+
+            if newest_eval is None or newest_eval.evaluated_at < cutoff:
+                needs_scoring.append(job)
+
+        if limit is not None:
+            needs_scoring = needs_scoring[:limit]
+
+        # Detach from session so caller can use them after session closes
+        for job in needs_scoring:
+            session.expunge(job)
+
+    return needs_scoring
+
+
+def _persist_evaluation(*, job: Job, assessment: JobAssessment, model_used: str) -> None:
+    """Write one Evaluation row for a job + its assessment."""
+    with get_session() as session:
+        evaluation = Evaluation(
+            job_id=job.id,
+            score=assessment.score,
+            matched_skills=json.dumps(assessment.matched_skills),
+            rationale=assessment.rationale,
+            model_used=model_used,
+            profile_version=PROFILE.__class__.__name__ + ":v1",  # crude version stamp
+        )
+        session.add(evaluation)
+        session.commit()
+
+
+def _current_model_id() -> str:
+    """Best-effort identifier for which model produced the scores."""
+    from app.config import settings
+    return f"ollama:{settings.MODEL_LOCAL}"
