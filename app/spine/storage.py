@@ -148,3 +148,45 @@ def get_session() -> Session:
     (use as a context manager: `with get_session() as s:`).
     """
     return Session(engine)
+
+# ============================================================================
+# Helpers — common write patterns
+# ============================================================================
+
+
+def upsert_jobs(jobs: list[Job]) -> tuple[int, int]:
+    """
+    Insert new jobs, skip ones we already have.
+
+    Identity is (source, source_job_id). If a row with that pair already
+    exists, we leave it alone — we don't update it, because once we've
+    scraped a job, our copy is canonical (the source listing might change,
+    but our scoring history is anchored to what we first saw).
+
+    Returns:
+        (inserted_count, skipped_count)
+    """
+    from sqlmodel import select
+
+    inserted = 0
+    skipped = 0
+
+    with get_session() as session:
+        for job in jobs:
+            existing = session.exec(
+                select(Job).where(
+                    Job.source == job.source,
+                    Job.source_job_id == job.source_job_id,
+                )
+            ).first()
+
+            if existing is not None:
+                skipped += 1
+                continue
+
+            session.add(job)
+            inserted += 1
+
+        session.commit()
+
+    return inserted, skipped
