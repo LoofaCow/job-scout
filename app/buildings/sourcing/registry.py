@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.spine.storage import get_session
 
@@ -109,11 +109,12 @@ def get_due_sources(now: Optional[datetime] = None, limit: int = 50) -> list[Sou
     with get_session() as session:
         sources = session.exec(
             select(Source)
-            .where(Source.status.in_(pollable))
+            .where(col(Source.status).in_(pollable))
             .where(
-                (Source.next_poll_at == None) | (Source.next_poll_at <= now)  # noqa: E711
+                (col(Source.next_poll_at).is_(None))
+                | (col(Source.next_poll_at) <= now)
             )
-            .order_by(Source.next_poll_at)
+            .order_by(col(Source.next_poll_at))
             .limit(limit)
         ).all()
         for s in sources:

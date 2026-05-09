@@ -127,7 +127,10 @@ class PoliteFetcher:
             raise RuntimeError("PoliteFetcher must be used inside `async with`")
         rp = await self._robots.get(self._client, url)
         try:
-            return rp.crawl_delay(self._user_agent)
+            delay = rp.crawl_delay(self._user_agent)
+            if delay is None:
+                return None
+            return float(delay)
         except Exception:
             return None
 
