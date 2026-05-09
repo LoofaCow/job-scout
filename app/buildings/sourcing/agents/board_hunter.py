@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from app.buildings.sourcing.agents.helpers.verifier import verify_source_candidate
 from app.buildings.sourcing.http_client import PoliteFetcher
-from app.buildings.sourcing.models import SourcePipeline, SourceStatus
+from app.buildings.sourcing.models import SourcePipeline, SourceStatus, SourceType
 from app.buildings.sourcing.registry import update_source_status, upsert_source
 from app.buildings.sourcing.strategies.base import SourceCandidate
 from app.buildings.sourcing.strategies.registry import get_board_strategies, get_strategy
@@ -184,7 +184,7 @@ async def _verify_and_persist(
         source, was_created = upsert_source(
             url=candidate.url,
             name=result.suggested_name or candidate.name or candidate.url,
-            source_type=result.suggested_source_type,
+            source_type=result.suggested_source_type or SourceType.STRUCTURED_BOARD,
             pipeline=SourcePipeline.CAREER,
             discovered_by="board_hunter",
             discovered_strategy=strategy_name,

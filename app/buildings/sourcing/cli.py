@@ -7,6 +7,7 @@ Usage:
     python -m app.buildings.sourcing run board_hunter --max-candidates 10
     python -m app.buildings.sourcing list-sources
     python -m app.buildings.sourcing list-sources --status quarantine
+    python -m app.buildings.sourcing list-sources --full-notes
 """
 
 import argparse
@@ -59,6 +60,11 @@ def main() -> None:
         default=None,
         help="Filter by status",
     )
+    list_p.add_argument(
+        "--full-notes",
+        action="store_true",
+        help="Show full verifier rationale instead of one-line preview",
+    )
 
     args = parser.parse_args()
 
@@ -78,7 +84,11 @@ def main() -> None:
         return
 
     if args.command == "list-sources":
-        _list_sources(limit=args.limit, status=args.status)
+        _list_sources(
+            limit=args.limit,
+            status=args.status,
+            full_notes=args.full_notes,
+        )
         return
 
 
@@ -87,7 +97,12 @@ def main() -> None:
 # ============================================================================
 
 
-def _list_sources(*, limit: int, status: str | None) -> None:
+def _list_sources(
+    *,
+    limit: int,
+    status: str | None,
+    full_notes: bool = False,
+) -> None:
     with get_session() as session:
         stmt = select(Source).limit(limit)
         if status is not None:
@@ -108,9 +123,13 @@ def _list_sources(*, limit: int, status: str | None) -> None:
             if s.scraper_hint:
                 print(f"      hint:       {s.scraper_hint}")
             if s.notes:
-                # one-line preview of notes
-                first_line = s.notes.splitlines()[0][:120]
-                print(f"      notes:      {first_line}")
+                if full_notes:
+                    indented = s.notes.replace("\n", "\n                  ")
+                    print(f"      notes:      {indented}")
+                else:
+                    first_line = s.notes.splitlines()[0][:120]
+                    suffix = "..." if len(s.notes) > 120 or "\n" in s.notes else ""
+                    print(f"      notes:      {first_line}{suffix}")
             print()
 
 

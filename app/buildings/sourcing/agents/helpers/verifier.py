@@ -64,7 +64,7 @@ class VerificationResult(BaseModel):
         default=None,
         description="Cleaned-up display name for the source.",
     )
-    suggested_source_type: SourceType = Field(
+    suggested_source_type: Optional[SourceType] = Field(
         default=SourceType.STRUCTURED_BOARD,
         description=(
             "What kind of source this is. STRUCTURED_BOARD for normal HTML "
