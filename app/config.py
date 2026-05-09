@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     NANOGPT_API_KEY: str = ""
     NANOGPT_BASE_URL: str = "https://nano-gpt.com/api/v1"
 
+    # === SearXNG (self-hosted via Podman) ===
+    SEARXNG_BASE_URL: str = "http://localhost:8080"
+
     # === Database ===
     DATABASE_URL: str = "sqlite:///./job_scout.db"
 

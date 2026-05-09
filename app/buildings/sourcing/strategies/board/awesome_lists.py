@@ -3,23 +3,25 @@ Awesome-lists strategy — parses curated GitHub README files for board links.
 
 GitHub "awesome lists" are community-maintained markdown documents that
 catalog tools/sites/resources for a topic. For job hunting, they're a
-gold mine: each list has dozens of pre-vetted board URLs.
+gold mine: each list has dozens of pre-vetted board URLs alongside many
+unrelated links (articles, books, podcasts, tools).
 
-This strategy fetches the raw markdown of seed lists, extracts the
-[name](url) link references, filters obvious non-source links (GitHub,
-Twitter, donate pages), and emits each remaining link as a candidate.
-The verifier handles the actual is-this-a-real-board judgment.
+This strategy fetches the raw markdown of seed lists, walks the document
+section by section, and only yields links from sections whose heading
+indicates job-board content. Non-board sections (Articles, Books, etc.)
+are skipped entirely. The verifier handles edge-case judgment within the
+yielded candidates.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, AsyncIterator
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, AsyncIterator, Iterator
 
 from app.buildings.sourcing.models import SourcePipeline, SourceType
 from app.buildings.sourcing.strategies.base import GigCandidate, SourceCandidate
+from app.buildings.sourcing.strategies.board._link_filter import is_plausible_board_url
 
 if TYPE_CHECKING:
     from app.buildings.sourcing.http_client import PoliteFetcher
@@ -41,27 +43,64 @@ SEED_LISTS: list[dict[str, str]] = [
 ]
 
 
-# Markdown link pattern: [text](url) — captures both groups
-LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+# Markdown link pattern: [text](url) — captures both groups.
+# The (?<!\!) negative lookbehind skips image refs ![alt](url).
+LINK_PATTERN = re.compile(r"(?<!\!)\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+# Heading detector: matches "## Heading", "### Heading", etc.
+HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
 
-# Domains we skip — these are link-list infrastructure, not job sources
-SKIP_DOMAINS: set[str] = {
-    "github.com",
-    "raw.githubusercontent.com",
-    "gist.github.com",
-    "twitter.com",
-    "x.com",
-    "linkedin.com",
-    "facebook.com",
-    "youtube.com",
-    "reddit.com",
-    "patreon.com",
-    "ko-fi.com",
-    "buymeacoffee.com",
-    "paypal.com",
-    "wikipedia.org",
-}
+# Strong positive signals for job-board sections.
+JOB_SECTION_KEYWORDS = (
+    "job board",
+    "job site",
+    "job listing",
+    "job platform",
+    "remote job",
+    "remote work site",
+    "where to find",
+    "find a job",
+    "find work",
+    "find remote",
+    "hiring",
+    "job hunting",
+    "career site",
+    "remote-first",
+    "list of companies",
+    "companies hiring",
+    "places to find",
+)
+
+
+# Strong negative signals — even if a job keyword matches, skip these.
+NON_JOB_SECTION_KEYWORDS = (
+    "article",
+    "blog",
+    "book",
+    "podcast",
+    "video",
+    "course",
+    "tutorial",
+    "newsletter",
+    "talk",
+    "speaker",
+    "tool",
+    "software",
+    "library",
+    "extension",
+    "newsletter",
+    "twitter account",
+    "youtube channel",
+    "guide",
+    "resource",
+    "framework",
+    "case study",
+    "interview",
+    "research",
+    "study",
+)
+
 
 
 class AwesomeListsStrategy:
@@ -72,7 +111,7 @@ class AwesomeListsStrategy:
         self,
         fetcher: "PoliteFetcher",
     ) -> AsyncIterator[SourceCandidate | GigCandidate]:
-        """Fetch each seed list, parse links, yield candidates."""
+        """Fetch each seed list, walk by section, yield board-section links."""
         for seed in SEED_LISTS:
             logger.info(f"awesome_lists: fetching {seed['name']}")
             response = await fetcher.get(seed["raw_url"], respect_robots=False)
@@ -90,16 +129,13 @@ class AwesomeListsStrategy:
             yielded = 0
             seen_urls: set[str] = set()
 
-            for match in LINK_PATTERN.finditer(markdown):
-                link_text = match.group(1).strip()
-                link_url = match.group(2).strip().rstrip(".,)")  # trim trailing punct
-
+            for heading, link_text, link_url in _walk_sections(markdown):
                 # In-list dedup; the hunter dedups across strategies separately
                 if link_url in seen_urls:
                     continue
                 seen_urls.add(link_url)
 
-                if not _is_plausible_board_url(link_url):
+                if not is_plausible_board_url(link_url):
                     continue
 
                 yield SourceCandidate(
@@ -108,44 +144,68 @@ class AwesomeListsStrategy:
                     suggested_type=SourceType.STRUCTURED_BOARD,
                     target_pipeline=SourcePipeline.CAREER,
                     discovery_context=(
-                        f"Listed in {seed['name']} as '{link_text}'. "
-                        f"{seed['context']}."
+                        f"Listed in {seed['name']} under section '{heading}' "
+                        f"as '{link_text}'. {seed['context']}."
                     ),
                     raw_evidence={
                         "seed_list": seed["name"],
+                        "section": heading,
                         "link_text": link_text,
                     },
                 )
                 yielded += 1
 
-            logger.info(f"awesome_lists: yielded {yielded} candidates from {seed['name']}")
+            logger.info(
+                f"awesome_lists: yielded {yielded} candidates from {seed['name']}"
+            )
 
 
-def _is_plausible_board_url(url: str) -> bool:
-    """Cheap pre-filter — drops obvious non-boards before verifier sees them."""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
+# ============================================================================
+# Markdown section walker
+# ============================================================================
+
+
+def _walk_sections(markdown: str) -> Iterator[tuple[str, str, str]]:
+    """
+    Walk the markdown line by line, tracking the current heading.
+    Yields (heading_text, link_text, link_url) for every link that appears
+    inside a section classified as job-board-relevant.
+    """
+    current_heading = ""
+    in_target_section = False
+
+    for line in markdown.splitlines():
+        # Update section context if this line is a heading
+        heading_match = HEADING_PATTERN.match(line)
+        if heading_match is not None:
+            current_heading = heading_match.group(2).strip()
+            in_target_section = _is_job_board_section(current_heading)
+            continue
+
+        if not in_target_section:
+            continue
+
+        # Extract every [text](url) from this line
+        for match in LINK_PATTERN.finditer(line):
+            link_text = match.group(1).strip()
+            link_url = match.group(2).strip().rstrip(".,)")
+            yield (current_heading, link_text, link_url)
+
+
+def _is_job_board_section(heading: str) -> bool:
+    """
+    Classify a heading as job-board-relevant.
+
+    Accept if any positive keyword matches AND no negative keyword matches.
+    The order matters: a heading like 'Articles about job boards' should
+    be rejected because it's an article section, not a board section.
+    """
+    h = heading.lower()
+
+    if any(neg in h for neg in NON_JOB_SECTION_KEYWORDS):
         return False
 
-    if parsed.scheme not in ("http", "https"):
-        return False
-    if not parsed.netloc:
-        return False
+    if any(pos in h for pos in JOB_SECTION_KEYWORDS):
+        return True
 
-    domain = parsed.netloc.lower()
-    # Strip leading "www." for matching
-    if domain.startswith("www."):
-        domain = domain[4:]
-
-    # Drop infrastructure links
-    for skip in SKIP_DOMAINS:
-        if domain == skip or domain.endswith("." + skip):
-            return False
-
-    # Drop file downloads and image links
-    path = parsed.path.lower()
-    if path.endswith((".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".zip")):
-        return False
-
-    return True
+    return False

@@ -1,0 +1,36 @@
+# SearXNG configuration for Job Scout.
+# Inherits all defaults; only overrides what we need.
+#
+# Notable choices:
+#   - formats includes 'json' so search_rotation can consume the API
+#   - bind to 0.0.0.0 inside container; port 8080 maps out to localhost
+#   - limiter disabled because only Job Scout queries this instance
+#   - public_instance disabled (we are not on searx.space)
+
+use_default_settings: true
+
+general:
+  instance_name: "Job Scout SearXNG"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: true
+
+server:
+  secret_key: "6333091f9c201cc95e5ae7c57b84a7d9a828c343bba8bc509615b57ce24f2589"
+  base_url: "http://localhost:8080/"
+  limiter: false                # rate-limiter, irrelevant for single-user
+  public_instance: false
+  bind_address: "0.0.0.0"
+  port: 8080
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+    - rss
+
+ui:
+  static_use_hash: true

@@ -73,7 +73,7 @@ class DiscoveryStrategy(Protocol):
     name: str
     target_pipeline: SourcePipeline
 
-    async def discover(
+    def discover(
         self,
         fetcher: "PoliteFetcher",
     ) -> AsyncIterator[SourceCandidate | GigCandidate]:

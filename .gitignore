@@ -21,3 +21,6 @@ wheels/
 .idea/
 .DS_Store
 Thumbs.db
+
+# SearXNG container runtime data (config itself is tracked)
+searxng-config/uwsgi.ini

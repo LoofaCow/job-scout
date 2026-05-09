@@ -10,14 +10,15 @@ strategies by name. To add a strategy:
 
 from app.buildings.sourcing.strategies.base import DiscoveryStrategy
 from app.buildings.sourcing.strategies.board.awesome_lists import AwesomeListsStrategy
+from app.buildings.sourcing.strategies.board.directory_crawl import DirectoryCrawlStrategy
+from app.buildings.sourcing.strategies.board.search_rotation import SearchRotationStrategy
 
 
 # === Board strategies — feed the career pipeline ===
 _BOARD_STRATEGIES: list[DiscoveryStrategy] = [
     AwesomeListsStrategy(),
-    # Pass 2b:
-    # DirectoryCrawlStrategy(),
-    # SearchRotationStrategy(),
+    DirectoryCrawlStrategy(),
+    SearchRotationStrategy(),
 ]
 
 
