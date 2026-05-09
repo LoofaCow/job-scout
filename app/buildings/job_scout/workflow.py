@@ -17,7 +17,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.buildings.job_scout.agents import score_unscored_jobs
 from app.buildings.job_scout.scrapers.registry import all_enabled_scrapers
@@ -45,6 +45,9 @@ async def run_scout(
             Useful for dev/testing; production should leave it None.
     """
     run = _start_run()
+    # _start_run refreshes the row, so id is always set by this point.
+    # Asserting once narrows run.id to int for every use below.
+    assert run.id is not None, "_start_run must return a run with an id"
     logger.info(f"=== Scout run #{run.id} started at {run.started_at} ===")
 
     try:
@@ -105,7 +108,9 @@ async def _scrape_all_sources() -> list[Job]:
 
     all_jobs: list[Job] = []
     for scraper, result in zip(scrapers, results):
-        if isinstance(result, Exception):
+        # gather(return_exceptions=True) yields BaseException, not Exception,
+        # so we must check the broader type for the type narrowing to stick.
+        if isinstance(result, BaseException):
             logger.error(f"Scraper {scraper.source_name} failed: {result}")
             continue
         all_jobs.extend(result)
@@ -168,6 +173,8 @@ def _fetch_run(run_id: int) -> ScoutRun:
     """Return the run row, detached from the session for safe use by caller."""
     with get_session() as session:
         run = session.get(ScoutRun, run_id)
+        if run is None:
+            raise RuntimeError(f"ScoutRun #{run_id} disappeared between writes")
         session.expunge(run)
     return run
 
@@ -188,7 +195,7 @@ def _count_surfaced_jobs() -> int:
             latest = session.exec(
                 select(Evaluation)
                 .where(Evaluation.job_id == job.id)
-                .order_by(Evaluation.evaluated_at.desc())
+                .order_by(col(Evaluation.evaluated_at).desc())
                 .limit(1)
             ).first()
             if latest is not None and latest.score >= threshold:

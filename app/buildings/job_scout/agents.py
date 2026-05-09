@@ -154,8 +154,17 @@ async def score_job(job: Job) -> JobAssessment:
     agent = build_scorer_agent()
     prompt = _format_job_for_scoring(job)
     response = await agent.arun(prompt)
-    # Agno returns a RunResponse; the parsed structured output lives on .content
-    return response.content
+
+    # Agno returns a RunResponse; with output_schema=JobAssessment + use_json_mode,
+    # response.content is parsed into a JobAssessment instance. Assert to satisfy
+    # the type checker AND to surface a real error if Agno ever returns something
+    # else (e.g., model output failed schema validation and got returned raw).
+    assessment = response.content
+    if not isinstance(assessment, JobAssessment):
+        raise RuntimeError(
+            f"Scorer returned unexpected content type: {type(assessment).__name__}"
+        )
+    return assessment
 
 
 def _format_job_for_scoring(job: Job) -> str:
@@ -190,7 +199,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.spine.storage import Evaluation, get_session
 
@@ -255,7 +264,7 @@ def _find_jobs_needing_scoring(*, cutoff: datetime, limit: int | None) -> list[J
             newest_eval = session.exec(
                 select(Evaluation)
                 .where(Evaluation.job_id == job.id)
-                .order_by(Evaluation.evaluated_at.desc())
+                .order_by(col(Evaluation.evaluated_at).desc())
                 .limit(1)
             ).first()
 
@@ -274,6 +283,7 @@ def _find_jobs_needing_scoring(*, cutoff: datetime, limit: int | None) -> list[J
 
 def _persist_evaluation(*, job: Job, assessment: JobAssessment, model_used: str) -> None:
     """Write one Evaluation row for a job + its assessment."""
+    assert job.id is not None, "Job from DB must have an id"
     with get_session() as session:
         evaluation = Evaluation(
             job_id=job.id,

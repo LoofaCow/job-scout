@@ -24,7 +24,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.buildings.job_scout.workflow import run_scout
 from app.buildings import sourcing  # noqa: F401  -- register sourcing tables with SQLModel
@@ -165,7 +165,7 @@ async def get_surfaced_jobs(limit: int = 50) -> list[SurfacedJob]:
             latest_eval = session.exec(
                 select(Evaluation)
                 .where(Evaluation.job_id == job.id)
-                .order_by(Evaluation.evaluated_at.desc())
+                .order_by(col(Evaluation.evaluated_at).desc())
                 .limit(1)
             ).first()
 
@@ -191,7 +191,7 @@ async def get_job(job_id: int) -> JobDetail:
         latest_eval = session.exec(
             select(Evaluation)
             .where(Evaluation.job_id == job_id)
-            .order_by(Evaluation.evaluated_at.desc())
+            .order_by(col(Evaluation.evaluated_at).desc())
             .limit(1)
         ).first()
 
@@ -224,7 +224,7 @@ async def get_runs(limit: int = 10) -> list[RunSummary]:
     """Recent scout runs, newest first. Header of the dashboard."""
     with get_session() as session:
         runs = session.exec(
-            select(ScoutRun).order_by(ScoutRun.started_at.desc()).limit(limit)
+            select(ScoutRun).order_by(col(ScoutRun.started_at).desc()).limit(limit)
         ).all()
         return [RunSummary(**r.model_dump()) for r in runs]
 
@@ -275,6 +275,7 @@ async def _run_scout_background() -> None:
 
 def _to_surfaced_job(job: Job, evaluation: Evaluation) -> SurfacedJob:
     """Combine a Job and its Evaluation into the dashboard-shaped response."""
+    assert job.id is not None, "Job from DB must have an id"
     return SurfacedJob(
         id=job.id,
         source=job.source,
