@@ -1,0 +1,1 @@
+"""Board discovery strategies — feed the career pipeline."""
