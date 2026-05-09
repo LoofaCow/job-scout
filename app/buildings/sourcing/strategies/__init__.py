@@ -1,0 +1,1 @@
+"""Discovery strategies — pluggable units of source/gig discovery."""

@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.buildings.job_scout.workflow import run_scout
+from app.buildings import sourcing  # noqa: F401  -- register sourcing tables with SQLModel
 from app.profile import PROFILE
 from app.spine.storage import (
     ApplicationStatus,
