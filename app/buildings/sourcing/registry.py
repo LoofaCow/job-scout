@@ -247,3 +247,29 @@ def save_gig(gig: Gig) -> tuple[Gig, bool]:
         session.refresh(gig)
         session.expunge(gig)
         return gig, True
+    
+    # ============================================================================
+# Cross-run candidate dedup
+# ============================================================================
+
+
+def filter_already_known_urls(urls: list[str]) -> set[str]:
+    """
+    Return the subset of `urls` that are NOT already in the Source table.
+
+    Used by hunters to skip verification on candidates we've already verified
+    in past runs. Cuts runtime dramatically on repeat overnight runs.
+
+    Match is by exact URL — same normalization the hunter does in-run before
+    calling here.
+    """
+    if not urls:
+        return set()
+
+    with get_session() as session:
+        existing = session.exec(
+            select(Source.url).where(col(Source.url).in_(urls))
+        ).all()
+        existing_set = set(existing)
+
+    return {u for u in urls if u not in existing_set}

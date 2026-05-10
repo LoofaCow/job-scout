@@ -48,7 +48,12 @@ def main() -> None:
         "--max-candidates",
         type=int,
         default=DEFAULT_MAX_CANDIDATES,
-        help=f"Cap LLM verifications (default {DEFAULT_MAX_CANDIDATES})",
+        help=f"Cap LLM verifications (default {DEFAULT_MAX_CANDIDATES}). Use -1 for unlimited.",
+    )
+    run_p.add_argument(
+        "--unlimited",
+        action="store_true",
+        help="Disable verification cap entirely. Equivalent to --max-candidates -1.",
     )
 
     # === list-sources ===
@@ -73,10 +78,11 @@ def main() -> None:
 
     if args.command == "run":
         if args.hunter == "board_hunter":
+            cap = -1 if args.unlimited else args.max_candidates
             summary = asyncio.run(
                 run_board_hunter(
                     strategy_filter=args.strategy,
-                    max_candidates=args.max_candidates,
+                    max_candidates=cap,
                 )
             )
             print("\n=== BoardHunter summary ===")

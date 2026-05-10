@@ -22,14 +22,18 @@ from urllib.parse import urlparse
 from app.buildings.sourcing.agents.helpers.verifier import verify_source_candidate
 from app.buildings.sourcing.http_client import PoliteFetcher
 from app.buildings.sourcing.models import SourcePipeline, SourceStatus, SourceType
-from app.buildings.sourcing.registry import update_source_status, upsert_source
+from app.buildings.sourcing.registry import (
+    filter_already_known_urls,
+    update_source_status,
+    upsert_source,
+)
 from app.buildings.sourcing.strategies.base import SourceCandidate
 from app.buildings.sourcing.strategies.registry import get_board_strategies, get_strategy
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MAX_CANDIDATES = 20  # cap LLM calls per run; bump via CLI for real runs
+DEFAULT_MAX_CANDIDATES = 100  # cap LLM calls per run; bump via CLI for real runs
 
 
 async def run_board_hunter(
@@ -77,11 +81,28 @@ async def run_board_hunter(
         candidates = await _discover_candidates(strategies, fetcher)
         logger.info(f"Discovery complete: {len(candidates)} unique candidates")
 
-        candidates_to_verify = candidates[:max_candidates]
-        if len(candidates) > max_candidates:
+        # === Cross-run dedup: skip URLs already in the registry ===
+        all_urls = [_normalize_url(c.url) for _, c in candidates]
+        unknown_urls = filter_already_known_urls(all_urls)
+        new_candidates = [
+            (sn, c) for sn, c in candidates
+            if _normalize_url(c.url) in unknown_urls
+        ]
+        skipped_known = len(candidates) - len(new_candidates)
+        if skipped_known:
+            logger.info(
+                f"Cross-run dedup: skipping {skipped_known} candidates "
+                f"already in the registry"
+            )
+
+        candidates_to_verify = (
+            new_candidates if max_candidates < 0
+            else new_candidates[:max_candidates]
+        )
+        if max_candidates >= 0 and len(new_candidates) > max_candidates:
             logger.info(
                 f"Capping verification at {max_candidates} "
-                f"(found {len(candidates)} total)"
+                f"(found {len(new_candidates)} new)"
             )
 
         verified, persisted, rejected = await _verify_and_persist(
@@ -91,11 +112,16 @@ async def run_board_hunter(
     summary = {
         "strategies_run": [s.name for s in strategies],
         "discovered": len(candidates),
+        "skipped_already_known": skipped_known,
+        "new_candidates": len(new_candidates),
         "verified_attempted": len(candidates_to_verify),
         "verified_real": verified,
         "persisted_new": persisted,
         "rejected": rejected,
-        "skipped_over_cap": max(0, len(candidates) - max_candidates),
+        "skipped_over_cap": (
+            0 if max_candidates < 0
+            else max(0, len(new_candidates) - max_candidates)
+        ),
     }
     logger.info(f"BoardHunter complete: {summary}")
     return summary

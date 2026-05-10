@@ -1,13 +1,14 @@
 """
 Directory-crawl strategy — extracts job-board URLs from curated directory pages.
 
-Some pages on the web exist specifically to catalog job boards: Wikipedia
-articles, list-of-X pages on tech sites, "best job boards 20XX" listicles.
-This strategy fetches them, regex-extracts <a href="..."> values, runs the
-shared plausibility filter, and yields candidates.
+Some pages on the web exist specifically to catalog job boards: listicles,
+"best of" articles, niche industry hubs, community wiki pages. This strategy
+fetches them, regex-extracts <a href="..."> values, runs the shared
+plausibility filter, and yields candidates.
 
-Regex (not bs4) is intentional: we only need the href value itself, the
-verifier handles the rest, and we don't want to add a parsing dep yet.
+Wikipedia was the original seed but produced too many news/citation links and
+no real job boards. The replacements below are pages that explicitly link to
+job boards by intent.
 """
 
 from __future__ import annotations
@@ -26,22 +27,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Seed directory pages. Each entry is fetched once per run; all <a href>
-# values are extracted, filtered, and yielded as candidates.
-#
-# To add a directory: append a dict here. Same shape, no other changes.
+# Seed directory pages. Curated pages whose explicit purpose is to link
+# at job boards. We swap content occasionally as listicles age.
 SEED_DIRECTORIES: list[dict[str, str]] = [
     {
-        "name": "Wikipedia: Employment website",
-        "url": "https://en.wikipedia.org/wiki/Employment_website",
-        "context": "Wikipedia article on employment websites; external links section",
+        "name": "Arc.dev — Best Remote Job Boards",
+        "url": "https://arc.dev/employer-blog/best-remote-job-boards/",
+        "context": "Listicle of remote-friendly job boards",
+    },
+    {
+        "name": "FlexJobs — Top Remote Job Sites",
+        "url": "https://www.flexjobs.com/blog/post/top-50-best-remote-jobs-companies/",
+        "context": "Curated list of remote-job sites",
+    },
+    {
+        "name": "Working Nomads — Remote Job Boards Directory",
+        "url": "https://www.workingnomads.com/blog/best-remote-job-boards/",
+        "context": "Working Nomads' directory of remote job boards",
+    },
+    {
+        "name": "Built In — Tech Job Boards",
+        "url": "https://builtin.com/articles/best-tech-job-boards",
+        "context": "Built In's roundup of tech-focused job boards",
+    },
+    {
+        "name": "DEV Community — Niche Tech Job Boards",
+        "url": "https://dev.to/llabusch/9-niche-tech-job-boards-you-should-know-1c8d",
+        "context": "DEV Community post listing niche tech boards",
+    },
+    {
+        "name": "Indie Hackers — Job Boards",
+        "url": "https://www.indiehackers.com/post/list-of-job-boards-2cfb09cdb1",
+        "context": "Indie Hackers community list of job boards",
+    },
+    {
+        "name": "Hacker News — Where Are You Hiring? threads",
+        "url": "https://hn.algolia.com/?q=Ask+HN+Who+is+hiring",
+        "context": "HN search for monthly hiring threads",
+    },
+    {
+        "name": "ProductHunt — Job Boards Collection",
+        "url": "https://www.producthunt.com/topics/jobs",
+        "context": "Product Hunt listings tagged 'jobs'",
     },
 ]
 
 
-# Captures href values from <a> tags. Single or double quotes, absolute URLs only.
-# Edge cases (href split across lines, exotic quoting) fall through; the plausibility
-# filter and verifier handle whatever survives.
+# Captures href values from <a> tags. Single or double quotes, absolute URLs.
 HREF_PATTERN = re.compile(
     r'<a[^>]+href=["\'](https?://[^"\']+)["\']',
     re.IGNORECASE,
@@ -57,6 +89,9 @@ class DirectoryCrawlStrategy:
         fetcher: "PoliteFetcher",
     ) -> AsyncIterator[SourceCandidate | GigCandidate]:
         """Fetch each seed directory, extract links, yield candidates."""
+        total_yielded = 0
+        seen_urls: set[str] = set()
+
         for seed in SEED_DIRECTORIES:
             logger.info(f"directory_crawl: fetching {seed['name']}")
             response = await fetcher.get(seed["url"])
@@ -64,13 +99,13 @@ class DirectoryCrawlStrategy:
             if response is None or response.status_code != 200:
                 status = response.status_code if response else "none"
                 logger.warning(
-                    f"directory_crawl: failed to fetch {seed['name']} (status={status})"
+                    f"directory_crawl: failed to fetch {seed['name']} "
+                    f"(status={status})"
                 )
                 continue
 
             html = response.text
             yielded = 0
-            seen_urls: set[str] = set()
 
             for match in HREF_PATTERN.finditer(html):
                 link_url = match.group(1).strip().rstrip(".,)")
@@ -84,7 +119,7 @@ class DirectoryCrawlStrategy:
 
                 yield SourceCandidate(
                     url=link_url,
-                    name=None,  # we don't try to extract anchor text reliably
+                    name=None,
                     suggested_type=SourceType.STRUCTURED_BOARD,
                     target_pipeline=SourcePipeline.CAREER,
                     discovery_context=(
@@ -97,6 +132,10 @@ class DirectoryCrawlStrategy:
                 )
                 yielded += 1
 
+            total_yielded += yielded
             logger.info(
-                f"directory_crawl: yielded {yielded} candidates from {seed['name']}"
+                f"directory_crawl: yielded {yielded} candidates from "
+                f"{seed['name']}"
             )
+
+        logger.info(f"directory_crawl: total {total_yielded} candidates")
