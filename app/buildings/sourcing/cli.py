@@ -55,6 +55,24 @@ def main() -> None:
         action="store_true",
         help="Disable verification cap entirely. Equivalent to --max-candidates -1.",
     )
+    run_p.add_argument(
+        "--time-limit",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "Run continuously for this many hours, looping discovery and "
+            "verification until the time runs out. Sources accumulate across "
+            "cycles. Each cycle samples a different set of search queries. "
+            "Best for overnight saturation runs."
+        ),
+    )
+
+    # === migrate-urls (one-time DB cleanup) ===
+    sub.add_parser(
+        "migrate-urls",
+        help="Normalize URLs of existing Source rows. Idempotent.",
+    )
 
     # === list-sources ===
     list_p = sub.add_parser("list-sources", help="Print sources in the registry")
@@ -79,14 +97,23 @@ def main() -> None:
     if args.command == "run":
         if args.hunter == "board_hunter":
             cap = -1 if args.unlimited else args.max_candidates
+            time_limit_seconds = (
+                args.time_limit * 3600.0 if args.time_limit is not None else None
+            )
             summary = asyncio.run(
                 run_board_hunter(
                     strategy_filter=args.strategy,
                     max_candidates=cap,
+                    time_limit_seconds=time_limit_seconds,
                 )
             )
             print("\n=== BoardHunter summary ===")
             print(json.dumps(summary, indent=2))
+        return
+    if args.command == "migrate-urls":
+        from app.buildings.sourcing.registry import normalize_existing_source_urls
+        updated, unchanged = normalize_existing_source_urls()
+        print(f"URL migration complete: {updated} updated, {unchanged} unchanged")
         return
 
     if args.command == "list-sources":

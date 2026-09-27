@@ -122,6 +122,32 @@ def get_due_sources(now: Optional[datetime] = None, limit: int = 50) -> list[Sou
         return list(sources)
 
 
+def get_pollable_career_sources(limit: Optional[int] = None) -> list[Source]:
+    """
+    Return all QUARANTINE/ACTIVE sources on the career pipeline.
+
+    Used by the job_scout workflow to enumerate sources for scraping. Unlike
+    get_due_sources, this ignores next_poll_at — the workflow polls
+    everything every run (the future Pass 4 scheduler will switch to
+    cadence-aware polling).
+    """
+    pollable = (SourceStatus.ACTIVE, SourceStatus.QUARANTINE)
+
+    with get_session() as session:
+        stmt = (
+            select(Source)
+            .where(col(Source.status).in_(pollable))
+            .where(Source.pipeline == SourcePipeline.CAREER)
+            .order_by(col(Source.id))
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        sources = session.exec(stmt).all()
+        for s in sources:
+            session.expunge(s)
+        return list(sources)
+
+
 def update_source_status(
     source_id: int,
     new_status: SourceStatus,
@@ -273,3 +299,45 @@ def filter_already_known_urls(urls: list[str]) -> set[str]:
         existing_set = set(existing)
 
     return {u for u in urls if u not in existing_set}
+
+# ============================================================================
+# One-time migration helpers
+# ============================================================================
+
+
+def normalize_existing_source_urls() -> tuple[int, int]:
+    """
+    Walk every Source row, normalize its URL, save back if it changed.
+
+    One-time cleanup for sources stored before URL normalization was applied
+    on insert. Idempotent — safe to run multiple times.
+
+    Returns: (rows_updated, rows_unchanged)
+    """
+    def _norm(u: str) -> str:
+        try:
+            p = urlparse(u)
+        except ValueError:
+            return u
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = p.path.rstrip("/") or "/"
+        return f"{p.scheme.lower()}://{netloc}{path}"
+
+    updated = 0
+    unchanged = 0
+
+    with get_session() as session:
+        all_sources = session.exec(select(Source)).all()
+        for s in all_sources:
+            new_url = _norm(s.url)
+            if new_url == s.url:
+                unchanged += 1
+                continue
+            s.url = new_url
+            session.add(s)
+            updated += 1
+        session.commit()
+
+    return updated, unchanged

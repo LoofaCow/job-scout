@@ -30,46 +30,23 @@ logger = logging.getLogger(__name__)
 # Seed directory pages. Curated pages whose explicit purpose is to link
 # at job boards. We swap content occasionally as listicles age.
 SEED_DIRECTORIES: list[dict[str, str]] = [
-    {
-        "name": "Arc.dev — Best Remote Job Boards",
-        "url": "https://arc.dev/employer-blog/best-remote-job-boards/",
-        "context": "Listicle of remote-friendly job boards",
-    },
-    {
-        "name": "FlexJobs — Top Remote Job Sites",
-        "url": "https://www.flexjobs.com/blog/post/top-50-best-remote-jobs-companies/",
-        "context": "Curated list of remote-job sites",
-    },
-    {
-        "name": "Working Nomads — Remote Job Boards Directory",
-        "url": "https://www.workingnomads.com/blog/best-remote-job-boards/",
-        "context": "Working Nomads' directory of remote job boards",
-    },
-    {
-        "name": "Built In — Tech Job Boards",
-        "url": "https://builtin.com/articles/best-tech-job-boards",
-        "context": "Built In's roundup of tech-focused job boards",
-    },
-    {
-        "name": "DEV Community — Niche Tech Job Boards",
-        "url": "https://dev.to/llabusch/9-niche-tech-job-boards-you-should-know-1c8d",
-        "context": "DEV Community post listing niche tech boards",
-    },
+    # Each seed verified to be alive and contain job-board links specifically
+    # (not events, articles, or marketing content). When listicles age out we
+    # swap them out — a small static catalog kept current beats a large stale
+    # one.
     {
         "name": "Indie Hackers — Job Boards",
         "url": "https://www.indiehackers.com/post/list-of-job-boards-2cfb09cdb1",
         "context": "Indie Hackers community list of job boards",
     },
     {
-        "name": "Hacker News — Where Are You Hiring? threads",
+        "name": "Hacker News — Algolia search for hiring threads",
         "url": "https://hn.algolia.com/?q=Ask+HN+Who+is+hiring",
-        "context": "HN search for monthly hiring threads",
+        "context": "HN search results page; links to monthly hiring threads",
     },
-    {
-        "name": "ProductHunt — Job Boards Collection",
-        "url": "https://www.producthunt.com/topics/jobs",
-        "context": "Product Hunt listings tagged 'jobs'",
-    },
+    # Most general-web 'best job boards' listicles 404 quickly or sit behind
+    # WAFs that block our user-agent. We grow this list opportunistically as
+    # we encounter sites that reliably link to job boards.
 ]
 
 

@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-QUERIES_PER_RUN = 5            # how many queries to sample from SEED_QUERIES per run
+QUERIES_PER_RUN = 15            # how many queries to sample from SEED_QUERIES per run
 MAX_QUERY_RETRIES = 2          # tolerate transient failures (engine timeouts) per query
 RESULTS_PER_QUERY_CAP = 15     # don't yield more than this many results per query
 

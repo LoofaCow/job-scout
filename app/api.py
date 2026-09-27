@@ -24,10 +24,12 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import and_, func, or_
 from sqlmodel import col, select
 
 from app.buildings.job_scout.workflow import run_scout
 from app.buildings import sourcing  # noqa: F401  -- register sourcing tables with SQLModel
+from app.buildings import tear_apart  # noqa: F401  -- register tear_apart tables with SQLModel
 from app.profile import PROFILE
 from app.spine.storage import (
     ApplicationStatus,
@@ -149,35 +151,142 @@ async def health() -> dict:
     return {"status": "ok", "service": "job_scout_api"}
 
 
-@app.get("/jobs/surfaced", response_model=list[SurfacedJob])
-async def get_surfaced_jobs(limit: int = 50) -> list[SurfacedJob]:
+class SurfacedPage(BaseModel):
+    """Paginated surfaced jobs + total count for the dashboard counter."""
+    total: int
+    jobs: list[SurfacedJob]
+
+
+@app.get("/jobs/surfaced", response_model=SurfacedPage)
+async def get_surfaced_jobs(
+    limit: int = 200,
+    offset: int = 0,
+    min_score: Optional[int] = None,
+    max_score: Optional[int] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: str = "score",
+) -> SurfacedPage:
     """
-    Return jobs at or above the surfacing threshold, sorted by score desc.
-    This is what the morning dashboard view shows.
+    Return jobs at or above the surfacing threshold, with optional filters.
+
+    Returns the matching page plus the total count so the dashboard can
+    show "showing 200 of 955 jobs" without a second request.
+
+    Filters:
+        min_score: floor for latest score (default = profile threshold)
+        max_score: ceiling for latest score
+        source:    exact-match Job.source (use /jobs/sources for the list)
+        search:    case-insensitive substring across title and company
+        sort:      "score" (default, desc) or "newest" (first_seen_at desc)
+
+    A single SQL query joins each job to its latest evaluation, so the
+    cost is O(jobs above threshold), not O(all jobs).
+    """
+    threshold = (
+        min_score if min_score is not None
+        else PROFILE.minimum_score_to_surface
+    )
+
+    with get_session() as session:
+        base = _build_surfaced_query(
+            threshold=threshold,
+            max_score=max_score,
+            source=source,
+            search=search,
+        )
+
+        # Total count for "showing X of Y" — same filters, no pagination.
+        total = session.exec(
+            select(func.count()).select_from(base.subquery())
+        ).one()
+
+        if sort == "newest":
+            ordered = base.order_by(
+                col(Job.first_seen_at).desc(),
+                col(Evaluation.score).desc(),
+            )
+        else:
+            ordered = base.order_by(
+                col(Evaluation.score).desc(),
+                col(Job.first_seen_at).desc(),
+            )
+
+        rows = session.exec(ordered.offset(offset).limit(limit)).all()
+        jobs = [_to_surfaced_job(job, evaluation) for job, evaluation in rows]
+
+    return SurfacedPage(total=total, jobs=jobs)
+
+
+@app.get("/jobs/sources", response_model=list[str])
+async def get_distinct_sources() -> list[str]:
+    """
+    Distinct Job.source values among non-archived jobs that meet the
+    profile's surfacing threshold. Drives the dashboard's source filter.
     """
     threshold = PROFILE.minimum_score_to_surface
 
     with get_session() as session:
-        all_jobs = session.exec(select(Job)).all()
+        base = _build_surfaced_query(threshold=threshold)
+        stmt = (
+            select(Job.source)
+            .select_from(base.subquery())
+            .distinct()
+            .order_by(col(Job.source))
+        )
+        return [row for row in session.exec(stmt).all() if row]
 
-        results: list[SurfacedJob] = []
-        for job in all_jobs:
-            latest_eval = session.exec(
-                select(Evaluation)
-                .where(Evaluation.job_id == job.id)
-                .order_by(col(Evaluation.evaluated_at).desc())
-                .limit(1)
-            ).first()
 
-            if latest_eval is None or latest_eval.score < threshold:
-                continue
-            if job.status == ApplicationStatus.ARCHIVED:
-                continue  # respect user dismissals
+def _build_surfaced_query(
+    *,
+    threshold: int,
+    max_score: Optional[int] = None,
+    source: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    """
+    Shared core query for the surfaced view: jobs joined to their most
+    recent evaluation, filtered by score, source, and search. Used by
+    both /jobs/surfaced and /jobs/sources.
+    """
+    latest_eval_subq = (
+        select(
+            Evaluation.job_id,
+            func.max(Evaluation.evaluated_at).label("latest_at"),
+        )
+        .group_by(col(Evaluation.job_id))
+        .subquery()
+    )
 
-            results.append(_to_surfaced_job(job, latest_eval))
+    base = (
+        select(Job, Evaluation)
+        .select_from(Job)
+        .join(latest_eval_subq, col(latest_eval_subq.c.job_id) == col(Job.id))
+        .join(
+            Evaluation,
+            and_(
+                col(Evaluation.job_id) == col(latest_eval_subq.c.job_id),
+                col(Evaluation.evaluated_at) == col(latest_eval_subq.c.latest_at),
+            ),
+        )
+        .where(Job.status != ApplicationStatus.ARCHIVED)
+        .where(col(Evaluation.score) >= threshold)
+    )
 
-    results.sort(key=lambda j: j.score, reverse=True)
-    return results[:limit]
+    if max_score is not None:
+        base = base.where(col(Evaluation.score) <= max_score)
+    if source:
+        base = base.where(Job.source == source)
+    if search:
+        pattern = f"%{search.strip()}%"
+        base = base.where(
+            or_(
+                col(Job.title).ilike(pattern),
+                col(Job.company).ilike(pattern),
+            )
+        )
+
+    return base
 
 
 @app.get("/jobs/{job_id}", response_model=JobDetail)

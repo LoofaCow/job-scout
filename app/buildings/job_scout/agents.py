@@ -78,10 +78,12 @@ def _build_instructions() -> str:
     The system-level instructions baked into every scorer agent.
     Built from PROFILE so it auto-updates when you edit your profile.
     """
-    strong = ", ".join(PROFILE.strong_skills) or "(none specified)"
-    learning = ", ".join(PROFILE.learning_skills) or "(none specified)"
-    target_roles = ", ".join(PROFILE.target_roles) or "(none specified)"
+    strong = "\n  - " + "\n  - ".join(PROFILE.strong_skills) if PROFILE.strong_skills else "(none specified)"
+    learning = "\n  - " + "\n  - ".join(PROFILE.learning_skills) if PROFILE.learning_skills else "(none specified)"
+    domains = "\n  - " + "\n  - ".join(PROFILE.domain_expertise) if PROFILE.domain_expertise else "(none specified)"
+    target_roles = "\n  - " + "\n  - ".join(PROFILE.target_roles) if PROFILE.target_roles else "(none specified)"
     dealbreakers = ", ".join(PROFILE.dealbreaker_keywords) or "(none specified)"
+    seniority = ", ".join(PROFILE.target_seniority) or "(none specified)"
 
     arrangement_parts = []
     if PROFILE.remote_ok:
@@ -100,34 +102,68 @@ job listing matches the user's profile and return a structured assessment.
 
 - Name: {PROFILE.name}
 - Location: {PROFILE.location_city} (open to relocation: {PROFILE.open_to_relocation})
-- Target roles: {target_roles}
-- Strong skills (the user is solid on these): {strong}
-- Learning skills (the user is studying these but not mastered): {learning}
+- Target seniority: {seniority}
 - Salary floor: ${PROFILE.salary_floor_usd:,} (avoid scoring high if listing is below this)
 - Salary target: ${PROFILE.salary_target_usd:,}
 - Acceptable work arrangements: {arrangements}
 - Dealbreaker keywords: {dealbreakers}
 
+### Background
+
+{PROFILE.background_summary}
+
+### Target roles (priority-ordered, earlier = higher pull)
+{target_roles}
+
+### Strong skills (productive without much reference)
+{strong}
+
+### Learning skills (studying or willing to ramp; can speak to but lean on docs/AI)
+{learning}
+
+### Domain expertise (areas of unusually deep knowledge)
+{domains}
+
 ## Scoring rubric
 
-- **90-100**: Excellent match. Listed responsibilities and requirements align
-  closely with the user's strong skills and target roles. Salary meets target.
-  Work arrangement acceptable.
-- **70-89**: Good match. Most strong skills relevant, role is in the target
-  list or a close variant. Salary above floor. Worth applying.
-- **50-69**: Mediocre. Some skills overlap but the role is a stretch (too
-  senior, wrong stack, or salary is uncertain). Worth a closer look but not a
-  priority.
-- **30-49**: Weak. Limited overlap, wrong seniority, or wrong field.
+- **90-100**: Excellent match. Role is squarely in the target list, multiple
+  strong skills are explicitly required, salary meets target, work arrangement
+  acceptable. Reserve for genuinely uncommon-quality fits.
+- **70-89**: Good match. Role is a target or close variant, strong-skill
+  overlap is substantial, salary above floor. Worth applying.
+- **50-69**: Mediocre. Partial overlap — some required skills land in
+  strong/learning, but the role is a stretch (seniority gap, missing one
+  required tech, or salary uncertain). Worth a closer look.
+- **30-49**: Weak. Limited overlap, wrong seniority, or wrong field, but not
+  obviously disqualifying. Surface for triage.
 - **0-29**: No fit. Wrong industry, wrong role, dealbreaker keywords present,
-  or salary far below floor.
+  far below salary floor, or seniority requires years of experience the user
+  cannot honestly claim.
+
+## Calibration notes
+
+- The user is entry-to-junior in the software/AI/IT track. Senior, Staff,
+  Principal, or Lead titles requiring 5+ years should not score above 49 even
+  when stacks match — gracefully cap with a "too senior" rationale.
+- The user has substantial hands-on technical breadth (hardware repair, QC,
+  retail-tech advisory) that maps to non-software roles. Don't penalize a
+  hardware/repair/QC role just because it isn't software.
+- AI/agent/LLM-related roles where the listing emphasizes Ollama, multi-agent
+  systems, prompt engineering, FastAPI, or local-inference design should
+  score notably higher when paired with junior/associate seniority — that's
+  the user's strongest current edge.
+- Quality-control and manufacturing-process roles are valid matches; treat
+  the user's Andersen experience as real quality-engineering background.
+- Customer-facing technical-support roles (especially involving consumer
+  electronics, batteries, or repair) should score well — the user has years
+  of high-volume direct experience.
 
 ## Output requirements
 
 - score: integer 0-100
-- matched_skills: only skills from the user's strong_skills or learning_skills
-  lists that the job actually requires or would benefit from. Do not invent
-  skills the user doesn't have. Empty list is fine.
+- matched_skills: only skills from the user's strong_skills, learning_skills,
+  or domain_expertise lists that the job actually requires or would benefit
+  from. Do not invent skills the user doesn't have. Empty list is fine.
 - rationale: 2-3 plain-English sentences. Reference specific requirements
   from the listing, not generic statements. If the user's experience is too
   junior or too senior for the role, say so explicitly.
@@ -150,9 +186,37 @@ async def score_job(job: Job) -> JobAssessment:
     Score a single job. Returns the structured assessment.
 
     Builds a fresh agent per call so concurrent scoring runs don't share state.
+
+    If a ListingAnalysis row exists for this job, the scorer prefers its
+    normalized fields and full_description over the raw scrape — that's the
+    whole point of running Tear Apart before scoring.
     """
+    # Lazy import to avoid a circular dependency: tear_apart imports
+    # spine.storage; spine.storage doesn't know about tear_apart.
+    from app.buildings.tear_apart.registry import get_analysis_for_job
+    from app.buildings.tear_apart.models import ListingClass
+
+    analysis = get_analysis_for_job(job.id) if job.id is not None else None
+
+    # Short-circuit obvious non-jobs the Tear Apart classifier already caught.
+    if analysis is not None and analysis.listing_class in (
+        ListingClass.NOT_A_JOB,
+        ListingClass.EXPIRED,
+        ListingClass.AGGREGATED_LIST,
+    ):
+        return JobAssessment(
+            score=0,
+            matched_skills=[],
+            rationale=(
+                f"Tear Apart classified this listing as "
+                f"{analysis.listing_class.value} — not a real open job. "
+                f"Auto-scored 0."
+            ),
+            dealbreaker_hit=None,
+        )
+
     agent = build_scorer_agent()
-    prompt = _format_job_for_scoring(job)
+    prompt = _format_job_for_scoring(job, analysis=analysis)
     response = await agent.arun(prompt)
 
     # Agno returns a RunResponse; with output_schema=JobAssessment + use_json_mode,
@@ -167,17 +231,24 @@ async def score_job(job: Job) -> JobAssessment:
     return assessment
 
 
-def _format_job_for_scoring(job: Job) -> str:
-    """Format a Job into a prompt the scorer can evaluate."""
-    salary_line = job.salary_text or "Not specified"
-    arrangement_parts = []
-    if job.is_remote:
-        arrangement_parts.append("remote")
-    if job.is_hybrid:
-        arrangement_parts.append("hybrid")
-    arrangement = ", ".join(arrangement_parts) or "Not specified"
+def _format_job_for_scoring(job: Job, *, analysis=None) -> str:
+    """
+    Format a Job (and its ListingAnalysis if present) into a scorer prompt.
 
-    return f"""\
+    Without analysis: uses raw scrape fields (legacy behavior).
+    With analysis: uses normalized title/company/salary/arrangement and the
+    fetched full_description when available.
+    """
+    if analysis is None:
+        salary_line = job.salary_text or "Not specified"
+        arrangement_parts = []
+        if job.is_remote:
+            arrangement_parts.append("remote")
+        if job.is_hybrid:
+            arrangement_parts.append("hybrid")
+        arrangement = ", ".join(arrangement_parts) or "Not specified"
+
+        return f"""\
 Evaluate this job listing.
 
 Title: {job.title}
@@ -188,6 +259,68 @@ Work arrangement: {arrangement}
 
 Description:
 {job.description}
+"""
+
+    # === Tear Apart-aware format ===
+    from app.buildings.tear_apart.registry import matched_skills_from_analysis
+
+    title = analysis.title_normalized or job.title
+    company = analysis.company_normalized or job.company
+    location = analysis.location_normalized or job.location
+
+    # Salary line: prefer normalized USD range, fall back to scraped text
+    if analysis.salary_min_usd or analysis.salary_max_usd:
+        cur = analysis.salary_currency or "USD"
+        if analysis.salary_min_usd and analysis.salary_max_usd:
+            salary_line = f"{cur} ${analysis.salary_min_usd:,} - ${analysis.salary_max_usd:,}"
+        elif analysis.salary_min_usd:
+            salary_line = f"{cur} from ${analysis.salary_min_usd:,}"
+        else:
+            salary_line = f"{cur} up to ${analysis.salary_max_usd:,}"
+    else:
+        salary_line = job.salary_text or "Not specified"
+
+    arrangement = analysis.work_arrangement.value if analysis.work_arrangement else "unknown"
+    employment_type = analysis.employment_type.value if analysis.employment_type else "unknown"
+    seniority = analysis.seniority.value if analysis.seniority else "unknown"
+
+    required, nice = matched_skills_from_analysis(analysis)
+    required_str = ", ".join(required) or "(not stated)"
+    nice_str = ", ".join(nice) or "(not stated)"
+
+    description = analysis.full_description or job.description
+    description_source = (
+        analysis.full_description_source
+        if analysis.full_description
+        else "rss_summary (raw scrape)"
+    )
+
+    visa_line = (
+        "yes" if analysis.visa_sponsorship_offered is True
+        else "no" if analysis.visa_sponsorship_offered is False
+        else "not stated"
+    )
+
+    return f"""\
+Evaluate this job listing.
+
+Title: {title}
+Company: {company}
+Location: {location}
+Salary: {salary_line}
+Work arrangement: {arrangement}
+Employment type: {employment_type}
+Seniority: {seniority}
+Visa sponsorship: {visa_line}
+
+Skills required: {required_str}
+Skills nice-to-have: {nice_str}
+
+Tear Apart classification: {analysis.listing_class.value} (confidence {analysis.is_real_job_confidence}/100)
+Description quality score: {analysis.description_quality_score}/100
+
+Description (source: {description_source}):
+{description}
 """
 
 # ============================================================================
@@ -253,32 +386,47 @@ async def score_unscored_jobs(
 
 
 def _find_jobs_needing_scoring(*, cutoff: datetime, limit: int | None) -> list[Job]:
-    """Return jobs that have no recent evaluation."""
+    """
+    Return jobs whose newest evaluation is missing or older than `cutoff`.
+
+    Single SQL: jobs LEFT JOIN (latest_evaluation_per_job) WHERE the latest
+    is NULL or older than cutoff. Replaces an old per-row lookup that
+    issued 3800+ round-trips on the current DB.
+    """
+    from sqlalchemy import func, or_
+
     with get_session() as session:
-        # Jobs with their newest evaluation date (NULL if never evaluated)
-        # We do this in two passes for clarity rather than one fancy query.
-        all_jobs = session.exec(select(Job)).all()
+        latest_eval_subq = (
+            select(
+                Evaluation.job_id,
+                func.max(Evaluation.evaluated_at).label("latest_at"),
+            )
+            .group_by(col(Evaluation.job_id))
+            .subquery()
+        )
 
-        needs_scoring = []
-        for job in all_jobs:
-            newest_eval = session.exec(
-                select(Evaluation)
-                .where(Evaluation.job_id == job.id)
-                .order_by(col(Evaluation.evaluated_at).desc())
-                .limit(1)
-            ).first()
-
-            if newest_eval is None or newest_eval.evaluated_at < cutoff:
-                needs_scoring.append(job)
-
+        stmt = (
+            select(Job)
+            .select_from(Job)
+            .outerjoin(
+                latest_eval_subq,
+                col(latest_eval_subq.c.job_id) == col(Job.id),
+            )
+            .where(
+                or_(
+                    col(latest_eval_subq.c.latest_at).is_(None),
+                    col(latest_eval_subq.c.latest_at) < cutoff,
+                )
+            )
+            .order_by(col(Job.id))
+        )
         if limit is not None:
-            needs_scoring = needs_scoring[:limit]
+            stmt = stmt.limit(limit)
 
-        # Detach from session so caller can use them after session closes
-        for job in needs_scoring:
+        jobs = session.exec(stmt).all()
+        for job in jobs:
             session.expunge(job)
-
-    return needs_scoring
+        return list(jobs)
 
 
 def _persist_evaluation(*, job: Job, assessment: JobAssessment, model_used: str) -> None:
@@ -291,7 +439,7 @@ def _persist_evaluation(*, job: Job, assessment: JobAssessment, model_used: str)
             matched_skills=json.dumps(assessment.matched_skills),
             rationale=assessment.rationale,
             model_used=model_used,
-            profile_version=PROFILE.__class__.__name__ + ":v1",  # crude version stamp
+            profile_version=PROFILE.__class__.__name__ + ":v2",  # bumped 2026-05-10 (resume-bible profile)
         )
         session.add(evaluation)
         session.commit()

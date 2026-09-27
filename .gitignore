@@ -24,3 +24,9 @@ Thumbs.db
 
 # SearXNG container runtime data (config itself is tracked)
 searxng-config/uwsgi.ini
+# Personal profile — the repo ships a generic example in app/profile.py
+app/profile_local.py
+
+# Personal source documents and anything extracted from them
+app/Data/
+_extracted_*.txt

@@ -3,24 +3,48 @@ Job scout workflow — the end-to-end pipeline for one nightly run.
 
 Pipeline stages:
     1. Start a ScoutRun row to track this execution
-    2. Run all enabled scrapers (in parallel) -> raw Job objects
-    3. Upsert into DB, dedup by (source, source_job_id)
-    4. Score everything that needs scoring (sequential, local model)
-    5. Mark the ScoutRun finished with final counts
+    2. Pull every QUARANTINE/ACTIVE career source from the registry
+    3. Dispatch each through the scraper handler that fits its source_type
+       and scraper_hint, with bounded concurrency and per-domain politeness
+    4. Log a SourceObservation row per poll attempt (event type + duration)
+    5. Upsert returned jobs into the DB, dedup by (source.domain, source_job_id)
+    6. Score everything that needs scoring (sequential, local model)
+    7. Mark the ScoutRun finished with final counts
 
 The workflow is the *only* code that knows about all of these stages
 together. Scrapers don't know about scoring; the scorer doesn't know
 about scrapers; storage doesn't know about either. Workflow = orchestration.
+
+Concurrency model: one PoliteFetcher across the whole run (so robots cache
+and per-domain rate limits are shared), one asyncio.Semaphore bounding the
+number of in-flight scrape calls, and asyncio.gather to fan out. Most
+sources are RSS feeds returning in ~1-3 seconds, so the bottleneck is the
+politeness floor (5s default between same-domain requests) rather than CPU.
 """
 
 import asyncio
 import logging
-from datetime import datetime
+from typing import Optional
 
 from sqlmodel import col, select
 
 from app.buildings.job_scout.agents import score_unscored_jobs
-from app.buildings.job_scout.scrapers.registry import all_enabled_scrapers
+from app.buildings.job_scout.scrapers.dispatcher import (
+    DispatchDecision,
+    dispatch,
+)
+from app.buildings.job_scout.scrapers.outcome import ScrapeOutcome
+from app.buildings.sourcing.http_client import PoliteFetcher
+from app.buildings.sourcing.models import (
+    ObservationEvent,
+    Source,
+)
+from app.buildings.sourcing.registry import (
+    get_pollable_career_sources,
+    increment_empty_polls,
+    log_observation,
+    mark_source_alive,
+)
 from app.profile import PROFILE
 from app.spine.storage import (
     Job,
@@ -32,28 +56,39 @@ from app.spine.storage import (
 logger = logging.getLogger(__name__)
 
 
+# How many sources to scrape concurrently. Per-domain rate limits are still
+# enforced by PoliteFetcher; this just caps total in-flight HTTP work so we
+# don't open hundreds of sockets at once.
+SCRAPE_CONCURRENCY = 8
+
+# Default cap on sources per run. Overrideable via run_scout(max_sources=...).
+# None = scrape every pollable career source.
+DEFAULT_MAX_SOURCES = None
+
+
 async def run_scout(
     *,
-    max_jobs_to_score: int | None = None,
+    max_jobs_to_score: Optional[int] = None,
+    max_sources: Optional[int] = DEFAULT_MAX_SOURCES,
 ) -> ScoutRun:
     """
     Execute one full scout run. Returns the ScoutRun row with final counts.
 
     Args:
-        max_jobs_to_score: Cap on scoring this run (passed through to
-            score_unscored_jobs). None = score everything that needs it.
-            Useful for dev/testing; production should leave it None.
+        max_jobs_to_score: Cap on scoring this run. None = score everything
+            that needs scoring. Useful for first runs where the scoring
+            queue is huge; the next run picks up where this one left off.
+        max_sources: Cap on how many registry sources to poll. None = poll
+            every pollable career source. Useful for testing.
     """
     run = _start_run()
-    # _start_run refreshes the row, so id is always set by this point.
-    # Asserting once narrows run.id to int for every use below.
     assert run.id is not None, "_start_run must return a run with an id"
     logger.info(f"=== Scout run #{run.id} started at {run.started_at} ===")
 
     try:
         # === Stage 1: scrape ===
-        all_jobs = await _scrape_all_sources()
-        logger.info(f"Scraped {len(all_jobs)} total jobs across all sources")
+        all_jobs = await _scrape_registry(max_sources=max_sources)
+        logger.info(f"Scraped {len(all_jobs)} total jobs across registry sources")
 
         # === Stage 2: upsert (dedup) ===
         inserted, skipped = upsert_jobs(all_jobs)
@@ -64,11 +99,10 @@ async def run_scout(
         logger.info(f"Scoring: {scored} scored, {failed} failed")
 
         # === Stage 4: count surfaced jobs ===
-        # "Surfaced" = jobs whose latest evaluation meets the profile threshold
         surfaced = _count_surfaced_jobs()
         logger.info(f"Surfaced (>= {PROFILE.minimum_score_to_surface}): {surfaced}")
 
-        # === Finalize the run row ===
+        # === Finalize ===
         _finalize_run(
             run_id=run.id,
             jobs_found=len(all_jobs),
@@ -82,44 +116,163 @@ async def run_scout(
         _mark_run_failed(run_id=run.id, error=str(e))
         raise
 
-    # Re-fetch the finalized run to return it with all counts populated
     return _fetch_run(run.id)
 
 
 # ============================================================================
-# Stages
+# Stage 1 — registry-driven scraping
 # ============================================================================
 
 
-async def _scrape_all_sources() -> list[Job]:
-    """Run every enabled scraper in parallel, gather all returned jobs."""
-    scrapers = all_enabled_scrapers(PROFILE.enabled_sources)
-    if not scrapers:
-        logger.warning("No scrapers enabled in PROFILE.enabled_sources")
+async def _scrape_registry(*, max_sources: Optional[int]) -> list[Job]:
+    """
+    Pull every pollable career source, dispatch each to its handler,
+    collect all returned Jobs.
+
+    - Sources without a handler (hostile aggregators, no RSS/JSON/ATS)
+      are logged and skipped without an HTTP call.
+    - Sources with a handler are polled with bounded concurrency.
+    - Every poll attempt logs a SourceObservation for pattern_tracker.
+    - Per-domain rate limits live in PoliteFetcher and persist across
+      the whole run.
+    """
+    sources = get_pollable_career_sources(limit=max_sources)
+    if not sources:
+        logger.warning(
+            "No pollable career sources in the registry. Run BoardHunter "
+            "first: python -m app.buildings.sourcing run board_hunter"
+        )
         return []
 
-    logger.info(f"Running {len(scrapers)} scrapers: {[s.source_name for s in scrapers]}")
-
-    # Parallel because scrapers are I/O bound and independent
-    results = await asyncio.gather(
-        *(scraper.fetch() for scraper in scrapers),
-        return_exceptions=True,  # one scraper failing shouldn't kill the rest
+    handler_buckets, skip_counts = _bucket_by_dispatch(sources)
+    logger.info(
+        f"Dispatch: {sum(len(v) for v in handler_buckets.values())} sources "
+        f"have a handler, {skip_counts['hostile']} hostile-skipped, "
+        f"{skip_counts['no_handler']} no-handler-skipped "
+        f"(of {len(sources)} total)"
     )
 
+    semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
     all_jobs: list[Job] = []
-    for scraper, result in zip(scrapers, results):
-        # gather(return_exceptions=True) yields BaseException, not Exception,
-        # so we must check the broader type for the type narrowing to stick.
+
+    async with PoliteFetcher() as fetcher:
+        coros = []
+        for source, handler in _iter_dispatched(handler_buckets):
+            coros.append(_run_one_with_semaphore(source, handler, fetcher, semaphore))
+
+        # gather collects results in order; each call also logs its own
+        # observation, so a failure in one source can't lose data for another.
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
+    handler_stats: dict[str, int] = {}
+    for result in results:
         if isinstance(result, BaseException):
-            logger.error(f"Scraper {scraper.source_name} failed: {result}")
+            logger.error(f"Scrape coroutine raised: {result}")
             continue
-        all_jobs.extend(result)
+        outcome: ScrapeOutcome = result
+        all_jobs.extend(outcome.jobs)
+        handler_stats[outcome.handler_name] = (
+            handler_stats.get(outcome.handler_name, 0) + len(outcome.jobs)
+        )
+
+    if handler_stats:
+        breakdown = ", ".join(
+            f"{name}={count}" for name, count in sorted(handler_stats.items())
+        )
+        logger.info(f"Scrape breakdown by handler: {breakdown}")
 
     return all_jobs
 
 
+def _bucket_by_dispatch(
+    sources: list[Source],
+) -> tuple[dict[str, list[tuple[Source, object]]], dict[str, int]]:
+    """
+    Split the source list into (sources-to-poll grouped by handler) and
+    (skip counts). Sources with no handler are silently dropped — we don't
+    want to waste a SourceObservation row on something we never polled.
+    """
+    buckets: dict[str, list[tuple[Source, object]]] = {}
+    skip_counts = {"hostile": 0, "no_handler": 0}
+
+    for source in sources:
+        handler, decision = dispatch(source)
+        if decision == DispatchDecision.HANDLER and handler is not None:
+            buckets.setdefault(handler.__name__, []).append((source, handler))
+        elif decision == DispatchDecision.SKIP_HOSTILE:
+            skip_counts["hostile"] += 1
+        else:
+            skip_counts["no_handler"] += 1
+
+    return buckets, skip_counts
+
+
+def _iter_dispatched(
+    buckets: dict[str, list[tuple[Source, object]]],
+):
+    """Flatten the per-handler buckets back into (source, handler) pairs."""
+    for items in buckets.values():
+        for source, handler in items:
+            yield source, handler
+
+
+async def _run_one_with_semaphore(
+    source: Source,
+    handler,
+    fetcher: PoliteFetcher,
+    semaphore: asyncio.Semaphore,
+) -> ScrapeOutcome:
+    """
+    Run a single source's handler under the concurrency cap, then translate
+    its outcome into the registry's observation log + alive/empty counters.
+
+    Failures here become SOURCE_BLOCKED-style observations rather than
+    propagating exceptions — one bad source must not kill the whole run.
+    """
+    async with semaphore:
+        try:
+            outcome = await handler(source, fetcher)
+        except Exception as e:
+            logger.warning(f"Handler crashed on {source.url}: {e}")
+            outcome = ScrapeOutcome.fetch_failed(
+                f"handler exception: {e}",
+                handler_name=getattr(handler, "__name__", "unknown"),
+                duration_ms=0,
+            )
+
+    if source.id is not None:
+        try:
+            log_observation(
+                source.id,
+                outcome.event,
+                listings_count=len(outcome.jobs),
+                error_message=outcome.error_message,
+                duration_ms=outcome.duration_ms,
+            )
+            if outcome.event == ObservationEvent.LISTINGS_FOUND:
+                mark_source_alive(source.id)
+            elif outcome.event == ObservationEvent.NO_LISTINGS:
+                increment_empty_polls(source.id)
+        except Exception as e:
+            # Observation logging must never break a scrape.
+            logger.warning(f"Failed to log observation for {source.url}: {e}")
+
+    if outcome.error_message:
+        logger.info(
+            f"  [{outcome.handler_name}] {source.domain}: "
+            f"{outcome.event.value} ({outcome.error_message})"
+        )
+    else:
+        logger.info(
+            f"  [{outcome.handler_name}] {source.domain}: "
+            f"{len(outcome.jobs)} jobs ({outcome.duration_ms}ms)"
+        )
+
+    return outcome
+
+
 # ============================================================================
-# Run row helpers
+# Run row helpers (unchanged)
 # ============================================================================
 
 
@@ -143,6 +296,7 @@ def _finalize_run(
     jobs_surfaced: int,
 ) -> None:
     """Update the ScoutRun row with final counts and finished_at."""
+    from datetime import datetime
     with get_session() as session:
         run = session.get(ScoutRun, run_id)
         if run is None:
@@ -159,11 +313,12 @@ def _finalize_run(
 
 def _mark_run_failed(*, run_id: int, error: str) -> None:
     """Record an error on the ScoutRun row when the pipeline blows up."""
+    from datetime import datetime
     with get_session() as session:
         run = session.get(ScoutRun, run_id)
         if run is None:
             return
-        run.error = error[:1000]  # truncate huge tracebacks
+        run.error = error[:1000]
         run.finished_at = datetime.utcnow()
         session.add(run)
         session.commit()
@@ -188,7 +343,6 @@ def _count_surfaced_jobs() -> int:
 
     threshold = PROFILE.minimum_score_to_surface
     with get_session() as session:
-        # Get latest evaluation per job, count how many are >= threshold
         all_jobs = session.exec(select(Job)).all()
         count = 0
         for job in all_jobs:

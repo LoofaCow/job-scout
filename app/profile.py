@@ -1,8 +1,13 @@
 """
-Trevor's job-hunt profile — the source of truth for what the scout looks for
-and how the scorer ranks what it finds.
+Job-hunt profile — what the scout looks for and how the scorer ranks it.
 
-Edit this file freely as your search evolves. Every agent reads from here.
+This file is a generic EXAMPLE, committed so the repo runs out of the box.
+Every agent reads from `PROFILE`.
+
+To use your own without committing it, copy this file to
+`app/profile_local.py` and edit it there. That path is gitignored, and if it
+exists it wins — see the bottom of this file. Otherwise the example below is
+used, and you can edit it directly.
 """
 
 from pydantic import BaseModel, Field
@@ -10,103 +15,110 @@ from pydantic import BaseModel, Field
 
 class Profile(BaseModel):
     # === Identity (used in cover letters / outreach drafts later) ===
-    name: str = "Trevor"
-    location_city: str = "Dubuque, IA"
+    name: str = "Example User"
+    location_city: str = "Springfield, IL"
     open_to_relocation: bool = True
     relocation_targets: list[str] = Field(
         default_factory=lambda: [
-            # Tech-oriented metros you'd consider
             "Austin, TX",
             "Denver, CO",
             "Raleigh, NC",
             "Minneapolis, MN",
-            "Madison, WI",
-            "Pittsburgh, PA",
         ]
     )
 
-    # === What you're looking for ===
+    # Free text. Gives the scorer context the skill lists can't carry —
+    # career direction, what you've actually shipped, how you work.
+    background_summary: str = (
+        "Self-taught developer with a support and operations background, "
+        "moving into backend and AI work. Comfortable across the stack: API "
+        "design, agent orchestration, persistence, and deployment."
+    )
+
+    # === Target roles — priority-ordered, earlier = higher pull ===
     target_roles: list[str] = Field(
         default_factory=lambda: [
-            # Order matters — earlier = stronger interest
-            "IT Service Desk",
-            "Help Desk Technician",
-            "Junior DevOps Engineer",
-            "Junior Software Developer",
+            "Junior Software Engineer",
+            "Junior Backend Engineer",
+            "AI Agent Developer",
             "Automation Engineer",
-            "Systems Administrator",
+            "IT Service Desk",
         ]
     )
 
-    # === Skills the agent should match against job listings ===
+    target_seniority: list[str] = Field(
+        default_factory=lambda: ["entry-level", "junior", "associate", "I / II"]
+    )
+
+    # === Strong skills — productive without much reference ===
+    # Keep this tight. A long list dilutes the scorer's signal.
     strong_skills: list[str] = Field(
         default_factory=lambda: [
-            "Windows administration",
-            "Hardware troubleshooting",
-            "Software troubleshooting",
             "Python",
-            "PowerShell",
+            "FastAPI",
+            "Local LLM inference (Ollama)",
+            "Multi-agent system design",
+            "Pydantic-validated structured outputs",
+            "SQL / SQLite",
             "Linux",
-            "Docker",
-            "Home lab / self-hosting",
-            "AI tooling (Ollama, n8n)",
-        ]
-    )
-    learning_skills: list[str] = Field(
-        default_factory=lambda: [
-            # Stuff you're studying but don't claim mastery of
-            "Networking (CCNA-track)",
-            "AWS / Cloud",
-            "Terraform",
-            "CompTIA Security+",
+            "Docker / Podman",
         ]
     )
 
-    # === Compensation ===
-    salary_floor_usd: int = 50_000   # below this, don't bother
-    salary_target_usd: int = 65_000  # what you actually want
-    salary_ceiling_irrelevant_above: int = 200_000  # ignore "anomaly" listings
+    # === Learning — studied, but not claimed as mastery ===
+    learning_skills: list[str] = Field(
+        default_factory=lambda: [
+            "Cloud (AWS / GCP)",
+            "Terraform",
+            "Kubernetes",
+            "Networking fundamentals",
+        ]
+    )
+
+    # === Domains whose vocabulary you actually know ===
+    domain_expertise: list[str] = Field(
+        default_factory=lambda: [
+            "AI / agentic systems and multi-agent architectures",
+            "Local LLM inference and prompt discipline",
+            "Self-hosted infrastructure and homelab design",
+            "Technical support and consumer-electronics repair",
+            "Quality control methodology",
+        ]
+    )
+
+    # === Compensation (USD) — 0 means "don't filter on salary" ===
+    salary_floor_usd: int = 0
+    salary_target_usd: int = 0
+    salary_ceiling_irrelevant_above: int = 500_000  # ignore anomalous listings
 
     # === Work arrangement ===
     remote_ok: bool = True
     hybrid_ok: bool = True
-    onsite_ok: bool = True  # in Dubuque or relocation targets only
+    onsite_ok: bool = True  # home city or relocation targets only
 
-    # === Dealbreakers — auto-reject jobs containing these ===
+    # === Dealbreakers — auto-reject listings containing these ===
     dealbreaker_keywords: list[str] = Field(
         default_factory=lambda: [
             "unpaid",
             "commission only",
+            "100% commission",
             "MLM",
+            "multi-level marketing",
             "door-to-door",
             "must own vehicle for company use",
         ]
     )
 
     # === Companies of interest (boost score if matched) ===
-    target_companies_local: list[str] = Field(
-        default_factory=lambda: [
-            "isolved",
-            "Trinity Health",
-            "HARDY Industries",
-        ]
-    )
-
-    # === Job boards to scrape ===
-    # We'll wire these up as scraper plugins. Order = priority.
-    enabled_sources: list[str] = Field(
-        default_factory=lambda: [
-            "remoteok",
-            "indeed_dubuque",
-            "indeed_remote",
-            # Future: "linkedin", "weworkremotely", "hn_whoshiring"
-        ]
-    )
+    target_companies_local: list[str] = Field(default_factory=list)
 
     # === Brief preferences ===
-    daily_brief_max_jobs: int = 10  # how many jobs to surface each morning
-    minimum_score_to_surface: int = 60  # 0-100; below this, don't show
+    daily_brief_max_jobs: int = 10
+    minimum_score_to_surface: int = 30  # 0-100; below this, don't show
 
 
-# Singleton — import this anywhere you need profile data
-PROFILE = Profile()
+# A gitignored app/profile_local.py wins if present; otherwise use the example.
+try:
+    from app.profile_local import PROFILE  # type: ignore[no-redef]
+except ImportError:
+    PROFILE = Profile()

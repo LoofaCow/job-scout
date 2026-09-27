@@ -34,16 +34,10 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Seed list catalog
 # ============================================================================
-#
-# Each seed points at the raw markdown URL of an awesome-list README. Add
-# entries here to broaden coverage; no other code changes needed.
-#
-# Some lists below are job-specific; others are tech/career topical lists
-# whose "Jobs" or "Job Boards" section we harvest. The section walker
-# handles classification.
 
 SEED_LISTS: list[dict[str, str]] = [
-    # ---- Pure remote-job lists ----
+    # Verified working seeds. Each one tested manually and confirmed to have
+    # heading-classified job-board sections that produce real candidates.
     {
         "name": "lukasz-madon/awesome-remote-job",
         "raw_url": (
@@ -60,87 +54,10 @@ SEED_LISTS: list[dict[str, str]] = [
         ),
         "context": "Established remote-first companies and where to find them",
     },
-    {
-        "name": "jessicard/remote-jobs",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "jessicard/remote-jobs/main/README.md"
-        ),
-        "context": "Curated list of companies offering remote work",
-    },
-    {
-        "name": "remoteintech/remote-jobs",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "remoteintech/remote-jobs/main/README.md"
-        ),
-        "context": "Companies hiring remotely in tech",
-    },
-    # ---- Industry / role topical lists with job sections ----
-    {
-        "name": "pditommaso/awesome-pipeline",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "pditommaso/awesome-pipeline/master/README.md"
-        ),
-        "context": "Pipeline / DevOps tools and resources",
-    },
-    {
-        "name": "veggiemonk/awesome-docker",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "veggiemonk/awesome-docker/master/README.md"
-        ),
-        "context": "Docker resources, including jobs sections",
-    },
-    {
-        "name": "kelseyhightower/nocode",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "kelseyhightower/nocode/master/README.md"
-        ),
-        "context": "Career/work resource directory",
-    },
-    {
-        "name": "MunGell/awesome-for-beginners",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "MunGell/awesome-for-beginners/main/README.md"
-        ),
-        "context": "Beginner-friendly resources, often with job-hunt sections",
-    },
-    {
-        "name": "EthicalSource/awesome-ethical-source",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "EthicalSource/awesome-ethical-source/main/README.md"
-        ),
-        "context": "Ethical companies and where they post jobs",
-    },
-    {
-        "name": "humanetech-community/awesome-humane-tech",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "humanetech-community/awesome-humane-tech/master/README.md"
-        ),
-        "context": "Humane-tech orgs and their job pages",
-    },
-    {
-        "name": "phodal/awesome-iot",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "phodal/awesome-iot/master/README.md"
-        ),
-        "context": "IoT industry resources including company pages",
-    },
-    {
-        "name": "Esri/awesome-arcgis-developer",
-        "raw_url": (
-            "https://raw.githubusercontent.com/"
-            "Esri/awesome-arcgis-developer/main/README.md"
-        ),
-        "context": "GIS developer ecosystem; some links lead to GIS-jobs pages",
-    },
+    # Recursion (depth=2) will discover lists these lists link to. So we don't
+    # need to manually maintain a huge top-level seed catalog — the awesome-X
+    # meta-pattern means good lists reference other good lists. Two strong
+    # seeds + recursion outperforms a long list of mediocre seeds.
 ]
 
 
@@ -222,6 +139,11 @@ AWESOME_LIST_PATTERN = re.compile(
 # Maximum recursion depth for following awesome-list links to other lists.
 # Depth 1 = the seeds themselves; depth 2 = lists they link to. We stop at 2.
 MAX_RECURSION_DEPTH = 2
+
+
+# ============================================================================
+# Strategy
+# ============================================================================
 
 
 class AwesomeListsStrategy:
@@ -386,9 +308,6 @@ def _to_raw_github_url(github_url: str) -> str | None:
     )
     if m:
         user, repo, branch = m.group(1), m.group(2), m.group(3) or "main"
-        # Best-effort: try `main` first; if it 404s the fetcher returns None
-        # and we move on. Some old repos still use `master` — we accept that
-        # we'll miss those, since trying both = 2x fetch budget.
         return (
             f"https://raw.githubusercontent.com/"
             f"{user}/{repo}/{branch}/README.md"
