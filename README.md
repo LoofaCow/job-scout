@@ -16,18 +16,18 @@ There are two halves. The first answers "where do job listings even live?" and
 the second answers "is this one worth my time?"
 
 ```
-   sourcing                              job_scout
-   ─────────                             ─────────
-   BoardHunter                           scrapers
-      ├── search rotation (SearXNG)         ↓
-      ├── awesome-lists                  dedup / upsert
-      └── directory crawl                   ↓
-             ↓                           LLM scorer
-      LLM verifier                          ↓
-             ↓                            SQLite
-      source registry  ──────────────────────┘
-                                             ↓
-                                      FastAPI → dashboard
+   sourcing            job_scout           tear_apart        researcher
+   ─────────           ─────────           ──────────        ──────────
+   BoardHunter         dispatcher          LLM analyst       gap filling
+    ├ search rotation   ├ ATS (GH/Lever)       ↓                 ↓
+    ├ awesome-lists     ├ RSS feeds        ListingAnalysis   full listing
+    └ directory crawl   └ JSON API             ↓              fetch
+         ↓                   ↓             needs more? ──────► │
+   LLM verifier        dedup / upsert          ↑               │
+         ↓                   ↓                 └───────────────┘
+   source registry ────► LLM scorer                re-analyze
+                              ↓
+                           SQLite ──► FastAPI ──► dashboard
 ```
 
 **Finding boards.** Most job tools hardcode a list of sites to scrape. This one
@@ -36,12 +36,31 @@ dedupes whatever URLs come back, and hands each candidate to an LLM that
 decides whether it's actually a job board worth scraping. Anything that passes
 gets saved to a registry so it doesn't have to be rediscovered.
 
+**Scraping what they hold.** A dispatcher looks at each verified source and
+picks a handler: cloud ATS platforms like Greenhouse and Lever have predictable
+URLs and documented JSON, so those get scraped without touching HTML. Otherwise
+it falls back to RSS or a generic JSON API handler. Hostile aggregators get
+skipped rather than fought. The dispatcher is a pure function of the source
+row — no network calls — so it's trivial to test.
+
 **Deciding what matters.** `app/profile.py` holds the things I care about —
 roles I want, skills I actually have versus ones I'm still learning, a salary
 floor, where I'm willing to live. A scoring agent reads each listing against
 that and returns a score out of 100, which of my skills it matched, and why it
 scored the way it did. It comes back as a structured object, not a paragraph I
 have to parse.
+
+**Tearing listings apart.** Raw job text is inconsistent, so `tear_apart` runs
+an LLM over each listing and normalizes it into a `ListingAnalysis` row —
+seniority, employment type, work arrangement, and the rest, as enums instead of
+prose.
+
+**And researching what's missing.** When the analyst can't tell something from
+the listing alone, it flags the row as needing research instead of guessing.
+The `researcher` building picks those up, fetches the full listing from its
+source, writes the findings back, and marks it complete — then tear_apart
+re-analyzes on the richer text. It's a loop: analyze, notice the gap, go fill
+it, analyze again.
 
 Every run gets logged with counts, so I can see what happened and when.
 
@@ -89,6 +108,15 @@ new way to find boards means writing one file. Crawling goes through a
 only file that knows about the whole pipeline — the scrapers don't know scoring
 exists, and the scorer doesn't know where listings came from. That separation
 is deliberate. It's what lets me add a scraper without touching anything else.
+
+**`buildings/tear_apart/`** normalizes listings into structured
+`ListingAnalysis` rows, one per job, updated in place on re-run.
+
+**`buildings/researcher/`** fills the gaps tear_apart flags, then hands the
+job back for re-analysis.
+
+Each building owns its own tables and registers them with the shared metadata
+on import, so adding one doesn't mean editing a central schema file.
 
 **`api.py`** puts it behind FastAPI. Runs kick off as background tasks, with a
 bit of in-process state so the UI can tell whether one's already going.
@@ -151,8 +179,18 @@ Board discovery has its own CLI:
 uv run python -m app.buildings.sourcing --help
 ```
 
-Edit `app/profile.py` before a real run — roles, skills, salary, location.
-Everything downstream reads from it.
+Every building has a CLI:
+
+```bash
+uv run python -m app.buildings.job_scout --help
+uv run python -m app.buildings.tear_apart --help
+uv run python -m app.buildings.researcher --help
+```
+
+Before a real run, set up your profile — roles, skills, salary, location.
+Everything downstream reads from it. Either edit `app/profile.py` directly, or
+copy it to `app/profile_local.py` (gitignored) and edit there; if that file
+exists it takes precedence.
 
 ---
 
@@ -172,18 +210,20 @@ Everything downstream reads from it.
 
 ## Where it's at
 
-Working: board discovery with LLM verification, the source registry, RemoteOK
-scraping, dedup, profile-based scoring with structured output, run tracking,
-and the API.
+Working: board discovery with LLM verification, the source registry, scraping
+via the ATS/RSS/JSON dispatcher, dedup, profile-based scoring, listing
+normalization through tear_apart, the research-and-reanalyze loop, run
+tracking, and the API. There are 3,800+ jobs in my local database at this
+point.
 
 Still to do:
 
-- More scrapers. The registry's built for it, RemoteOK is just the one I did
-  first.
+- Browser-tier scraping for the aggregators the dispatcher currently skips.
 - Scheduled runs — `apscheduler` is in the dependencies, and
   `spine/scheduler.py` is still a stub.
 - Drafting cover letters from the profile.
 - Giving agents memory across runs.
+- More research strategies. Company lookup is the obvious next one.
 
 ---
 
